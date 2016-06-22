@@ -134,11 +134,13 @@ function auth0_verify_email_page() {
 
 /**
  * User login API callback.
- * 
+ *
  * Checks the parameters passed by redirection from Auth0 and logs or registers
  * the user if the parameters are valid.
  */
 function auth0_callback() {
+  global $user;
+
   if (!auth0_enabled('login')) {
     return drupal_goto();
   }
@@ -161,11 +163,14 @@ function auth0_callback() {
     watchdog('Auth0', 'Error occurred while getting the Auth0 user info or ID token: @exception', array('@exception' => print_r($e, TRUE)), WATCHDOG_ERROR);
   }
 
-  // var_dump($auth0); die;
-
   $success = FALSE;
   if ($user_info) {
-    $success = auth0_login_auth0_user($user_info, $id_token);
+    if (!empty($user->uid)) {
+      $success = auth0_link_auth0_user($user, $user_info);
+    }
+    else {
+      $success = auth0_login_auth0_user($user_info, $id_token);
+    }
   }
   if (!$success) {
     drupal_set_message(t('There was a problem logging you in, sorry for the inconvenience.'), 'error');
@@ -262,6 +267,44 @@ function auth0_login_auth0_user($user_info, $id_token) {
 }
 
 /**
+ * Link an Auth0 account with an already authenticated user.
+ */
+function auth0_link_auth0_user($user, $user_info) {
+  // Ensure that a valid user object is provided.
+  if (empty($user->uid)) {
+    drupal_set_message(
+      t('To link this account with a Drupal user, you first must be logged into Drupal.'),
+      'error'
+    );
+    return FALSE;
+  }
+
+  // See if there is a user in the auth0_user table with the user info client id
+  $uid = auth0_find_auth0_user($user_info['user_id']);
+  if ($uid) {
+    drupal_set_message(
+      t('This account is already linked to a Drupal user. It cannot be linked to another one.'),
+      'error'
+    );
+    return FALSE;
+  }
+
+  $rv = auth0_insert_auth0_user($user_info, $user->uid);
+  if (!$rv) {
+    drupal_set_message(
+      t('An error occurred while attempting to link this account. Please try again.'),
+      'error'
+    );
+    return FALSE;
+  }
+
+  drupal_set_message(
+    t('Successfully linked the log in account with your Drupal user.')
+  );
+  return TRUE;
+}
+
+/**
  * Authenticate the given user.
  * 
  * We use our own login form because user_external_login loads the login form which
@@ -332,7 +375,7 @@ function auth0_insert_auth0_user($user_info, $uid) {
     'auth0_object' => serialize($user_info),
   );
 
-  drupal_write_record('auth0_user', $auth0_user);
+  return drupal_write_record('auth0_user', $auth0_user);
 }
 
 /**
@@ -721,13 +764,13 @@ function auth0_block_view($delta = '') {
 
   switch ($delta) {
     case 'auth0_lock':
-      if (!$user->uid) {
+//      if (!$user->uid) {
         $block['subject'] = '';
         $block['content'] = array(
           '#type' => 'markup',
           '#markup' => theme('auth0_lock', array('mode' => 'signin')),
         );
-      }
+//      }
       break;
   }
 
