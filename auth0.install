@@ -28,6 +28,10 @@ function auth0_schema() {
         'type' => 'text',
         'not null' => TRUE,
       ),
+      'id_token' => array(
+        'description' => 'The latest ID token used by the user to authenticate.',
+        'type' => 'text',
+      ),
     ),
     'indexes' => array(
       'drupal_id' => array('drupal_id'),
@@ -52,3 +56,17 @@ function auth0_uninstall() {
   variable_del('auth0_client_secret');
 }
 
+/**
+ * Adds `id_token` column to the `auth0_user` table.
+ */
+function auth0_update_7000() {
+  $ret = array();
+
+  $table_name = 'auth0_user';
+  $table = drupal_get_schema_unprocessed('auth0', $table_name);
+
+  $field_name = 'id_token';
+  $ret = db_add_field($table_name, $field_name, $table['fields'][$field_name]);
+
+  return $ret;
+}

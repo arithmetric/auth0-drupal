@@ -166,7 +166,7 @@ function auth0_callback() {
   $success = FALSE;
   if ($user_info) {
     if (!empty($user->uid)) {
-      $success = auth0_link_auth0_user($user, $user_info);
+      $success = auth0_link_auth0_user($user, $user_info, $id_token);
     }
     else {
       $success = auth0_login_auth0_user($user_info, $id_token);
@@ -215,7 +215,7 @@ function auth0_login_auth0_user($user_info, $id_token) {
 
   if ($uid) {
     // The user exists. Update the auth0_user with the new userInfo object.
-    auth0_update_auth0_object($user_info);
+    auth0_update_auth0_object($user_info, $id_token);
 
     // Log in the user.
     return auth0_authenticate_user($uid);
@@ -257,7 +257,7 @@ function auth0_login_auth0_user($user_info, $id_token) {
       }
     }
 
-    auth0_insert_auth0_user($user_info, $uid);
+    auth0_insert_auth0_user($user_info, $id_token, $uid);
 
     // Log in the user.
     return auth0_authenticate_user($uid);
@@ -269,7 +269,7 @@ function auth0_login_auth0_user($user_info, $id_token) {
 /**
  * Link an Auth0 account with an already authenticated user.
  */
-function auth0_link_auth0_user($user, $user_info) {
+function auth0_link_auth0_user($user, $user_info, $id_token) {
   // Ensure that a valid user object is provided.
   if (empty($user->uid)) {
     drupal_set_message(
@@ -289,19 +289,49 @@ function auth0_link_auth0_user($user, $user_info) {
     return FALSE;
   }
 
-  $rv = auth0_insert_auth0_user($user_info, $user->uid);
-  if (!$rv) {
+  // Get Auth0 profile data and ID token for current user.
+  $auth0_user = auth0_get_auth0_object_from_drupal_uid($user->uid);
+
+  // Get the domain name for the Auth0 service to use.
+  $domain = variable_get('auth0_domain', FALSE);
+
+  // Use primary and secondary accounts' ID tokens to link the accounts.
+  if (!empty($id_token) && !empty($auth0_user->id_token) && !empty($auth0_user->auth0_id) && !empty($domain)) {
+    $url = 'https://' . $domain . '/api/v2/users/' . $auth0_user->auth0_id . '/identities';
+    $data = array(
+      'link_with' => $id_token,
+    );
+    $options = array(
+      'headers' => array(
+        'Authorization' => 'Bearer ' . $auth0_user->id_token,
+        'Content-Type' => 'application/json; charset=utf-8',
+      ),
+      'method' => 'POST',
+      'data' => json_encode($data),
+    );
+
+    $res = drupal_http_request($url, $options);
+    if ($res && !empty($res->code) && $res->code >= 200 && $res->code < 300) {
+      drupal_set_message(
+        t('Successfully linked the log in account with your Drupal user.')
+      );
+      return TRUE;
+    }
+
     drupal_set_message(
-      t('An error occurred while attempting to link this account. Please try again.'),
+      t('An error occurred when attempting to link your accounts. Please try again or contact support.'),
       'error'
     );
+    watchdog('Auth0', 'Error occurred while attempting to link Auth0 accounts. Received response: @response', array('@response' => print_r($res, TRUE)), WATCHDOG_ERROR);
     return FALSE;
   }
 
   drupal_set_message(
-    t('Successfully linked the log in account with your Drupal user.')
+    t('An error occurred when attempting to link your accounts. Please try again or contact support.'),
+    'error'
   );
-  return TRUE;
+  watchdog('Auth0', 'Attempted to link accounts without two authorized accounts. Primary account: @account1 Secondary account: @account2', array('@account1' => print_r($auth0_user, TRUE), '@account2' => print_r($user_info, TRUE)), WATCHDOG_ERROR);
+  return FALSE;
 }
 
 /**
@@ -343,7 +373,7 @@ function auth0_find_auth0_user($id) {
 }
 
 /**
- * Return the uid of the user with the given Auth0 id.
+ * Return the Auth0 profile object for the user with the given Drupal user ID.
  */
 function auth0_get_auth0_object_from_drupal_uid($uid) {
   $rs = db_select('auth0_user', 'a')->fields('a')->condition('drupal_id', $uid, '=')->execute()->fetch();
@@ -359,20 +389,22 @@ function auth0_get_auth0_object_from_drupal_uid($uid) {
 /**
  * Save changes to the local cache of an Auth0 user object.
  */
-function auth0_update_auth0_object($user_info) {
+function auth0_update_auth0_object($user_info, $id_token) {
   db_update('auth0_user')->fields(array(
       'auth0_object' => serialize($user_info),
+      'id_token' => $id_token,
     ))->condition('auth0_id', $user_info['user_id'], '=')->execute();
 }
 
 /**
  * Create a local cached Auth0 user object.
  */
-function auth0_insert_auth0_user($user_info, $uid) {
+function auth0_insert_auth0_user($user_info, $id_token, $uid) {
   $auth0_user = array(
     'auth0_id' => $user_info['user_id'],
     'drupal_id' => $uid,
     'auth0_object' => serialize($user_info),
+    'id_token' => $id_token,
   );
 
   return drupal_write_record('auth0_user', $auth0_user);
@@ -746,7 +778,11 @@ function auth0_missing_dependencies_message() {
  */
 function auth0_block_info() {
   $blocks['auth0_lock'] = array(
-    'info' => t('Auth0 Lock widget'),
+    'info' => t('Auth0 Lock Login widget'),
+    'cache' => DRUPAL_CACHE_GLOBAL,
+  );
+  $blocks['auth0_link'] = array(
+    'info' => t('Auth0 Lock Account Link widget'),
     'cache' => DRUPAL_CACHE_GLOBAL,
   );
   return $blocks;
@@ -764,13 +800,23 @@ function auth0_block_view($delta = '') {
 
   switch ($delta) {
     case 'auth0_lock':
-//      if (!$user->uid) {
+      if (!$user->uid) {
         $block['subject'] = '';
         $block['content'] = array(
           '#type' => 'markup',
           '#markup' => theme('auth0_lock', array('mode' => 'signin')),
         );
-//      }
+      }
+      break;
+
+    case 'auth0_link':
+      if ($user->uid) {
+        $block['subject'] = '';
+        $block['content'] = array(
+          '#type' => 'markup',
+          '#markup' => theme('auth0_lock', array('mode' => 'signin')),
+        );
+      }
       break;
   }
 
